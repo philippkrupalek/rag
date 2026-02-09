@@ -1,0 +1,41 @@
+# Core
+numpy==1.26.4
+torch==2.2.0
+torchvision==0.17.0
+torchaudio==2.2.0
+
+# Document Parsing
+striprtf==0.0.26
+beautifulsoup4==4.12.3
+lxml==5.1.0
+
+# Embeddings & Retrieval
+sentence-transformers==2.2.2
+faiss-cpu==1.7.4
+rank-bm25==0.2.2
+FlagEmbedding==1.2.10
+
+# LangChain
+langchain==0.1.20
+langchain-community==0.0.38
+
+# LLM API
+openai==1.30.1
+
+# Transformers & Hugging Face
+transformers==4.40.2
+huggingface-hub==0.23.0
+tokenizers==0.19.1
+safetensors==0.4.3
+peft==0.10.0
+
+# Utilities
+scikit-learn==1.4.2
+scipy==1.13.0
+tqdm==4.66.4
+requests==2.31.0
+regex==2024.4.28
+
+# Optional: RAGAS Evaluation
+# ragas==0.1.7
+# datasets==2.19.0
