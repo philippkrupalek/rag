@@ -1,16 +1,17 @@
 """
 RAG System für österreichisches Umsatzsteuerrecht
-Version 13 - MIT ALLEN PARSER FIXES
+Version 13 - MIT ALLEN PARSER FIXES + DROPBOX DOWNLOAD
 
 FIXES ANGEWENDET:
 1. UStG Parser: Absatz 1 wird jetzt korrekt erfasst (war vorher systematisch fehlend)
 2. Anhang Parser: Absatz 1 wird jetzt korrekt erfasst
 3. UStR Parser: Deduplizierung der mehrfachen XML-Versionen (70-80% Duplikate entfernt)
+4. UStR Download: Datei wird automatisch von Dropbox heruntergeladen (Speicherplatz-Optimierung)
 
 Basierend auf deinem Original-Code mit folgenden Änderungen:
 - parse_ustg_hierarchical() -> NEU mit Absatz 1 Capture
 - parse_anhang_hierarchical() -> NEU mit Absatz 1 Capture  
-- parse_ustr() -> NEU mit Deduplizierung
+- parse_ustr() -> NEU mit Deduplizierung + Dropbox Download
 """
 
 import json
@@ -21,6 +22,9 @@ from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 from datetime import datetime
 from collections import defaultdict
+import urllib.request
+import tempfile
+import os
 
 import torch
 import numpy as np
@@ -72,7 +76,8 @@ warnings.filterwarnings('ignore')
 SCRIPT_DIR = Path(__file__).parent
 USTG_RTF_PATH = SCRIPT_DIR / "UStG1994.rtf"
 ANHANG_RTF_PATH = SCRIPT_DIR / "anhang_ustg.rtf"
-USTR_XML_PATH = SCRIPT_DIR / "UStR2000_html.xml"
+# NEU: Download-URL statt lokaler Pfad
+USTR_XML_URL = "https://www.dropbox.com/scl/fi/qpnbvv94ntx1ya6nfa00a/UStR2000_html.xml?rlkey=5f245v1miw61ceu6cvjsrs989&st=b20e2efj&dl=1"
 EVAL_DATA_PATH = SCRIPT_DIR / "evaluation_data.json"
 
 EMBEDDING_MODEL = "BAAI/bge-m3"
@@ -125,6 +130,48 @@ class Chunk:
             rz = self.metadata.get('randzahl', '')
             return f"UStR 2000 Rz {rz}" if rz else "UStR 2000"
         return "Unknown"
+
+
+# =============================================================================
+# HELPER: DOWNLOAD FROM DROPBOX
+# =============================================================================
+
+def download_ustr_xml(url: str) -> Path:
+    """
+    Download UStR XML from Dropbox URL.
+    Returns path to temporary file.
+    
+    WICHTIG: Dropbox-Links müssen mit dl=1 enden für direkten Download!
+    """
+    print(f"   📥 Downloading UStR XML from Dropbox...")
+    print(f"      URL: {url[:80]}...")
+    
+    try:
+        # Create temporary file
+        temp_file = tempfile.NamedTemporaryFile(mode='w+b', delete=False, suffix='.xml')
+        temp_path = Path(temp_file.name)
+        
+        # Download with progress indication
+        def show_progress(block_num, block_size, total_size):
+            downloaded = block_num * block_size
+            if total_size > 0:
+                percent = min(100, downloaded * 100 / total_size)
+                mb_downloaded = downloaded / (1024 * 1024)
+                mb_total = total_size / (1024 * 1024)
+                print(f"\r      Progress: {percent:.1f}% ({mb_downloaded:.1f}/{mb_total:.1f} MB)", end='')
+        
+        urllib.request.urlretrieve(url, temp_path, reporthook=show_progress)
+        print()  # Newline after progress
+        
+        file_size = temp_path.stat().st_size / (1024 * 1024)  # MB
+        print(f"   ✅ Downloaded: {file_size:.1f} MB to {temp_path}")
+        
+        return temp_path
+        
+    except Exception as e:
+        print(f"   ❌ Download failed: {e}")
+        print(f"   💡 Tipp: Stelle sicher, dass die URL mit '&dl=1' endet!")
+        raise
 
 
 # =============================================================================
@@ -465,12 +512,13 @@ def parse_anhang_hierarchical(rtf_path: Path) -> List[Chunk]:
 
 
 # =============================================================================
-# PARSER: UStR 2000 (XML) - MIT DEDUPLIZIERUNG
+# PARSER: UStR 2000 (XML) - MIT DEDUPLIZIERUNG + DROPBOX DOWNLOAD
 # =============================================================================
 
-def parse_ustr(xml_path: Path) -> List[Chunk]:
+def parse_ustr(xml_url: str) -> List[Chunk]:
     """
     Parse UStR 2000 XML mit Deduplizierung der Versionen.
+    NEU: Lädt die Datei automatisch von Dropbox herunter.
     
     FIX: Das XML enthält mehrere Versionen/Fassungen jeder Randzahl.
     Der alte Parser erzeugte 4-7 Duplikate pro Randzahl (70-80% redundant).
@@ -479,74 +527,86 @@ def parse_ustr(xml_path: Path) -> List[Chunk]:
     Vorher: ~16.274 Chunks (massive Duplikation)
     Nachher: ~2.500-3.500 Chunks (dedupliziert)
     """
-    print(f"   📂 Reading UStR from: {xml_path}")
+    print(f"   📂 Loading UStR from Dropbox...")
     
-    if not xml_path.exists():
-        print(f"   ❌ ERROR: File not found: {xml_path}")
+    # Download file from Dropbox
+    try:
+        xml_path = download_ustr_xml(xml_url)
+    except Exception as e:
+        print(f"   ❌ ERROR: Could not download file: {e}")
         return []
     
-    with open(xml_path, 'r', encoding='utf-8') as f:
-        xml_content = f.read()
-    
-    soup = BeautifulSoup(xml_content, 'xml')
-    segments = soup.find_all('Segment')
-    
-    # Alle Einträge sammeln (mit Duplikaten)
-    all_entries = []
-    
-    for segment in segments:
-        segbez = segment.find('segbez')
-        txt = segment.find('txt')
+    try:
+        with open(xml_path, 'r', encoding='utf-8') as f:
+            xml_content = f.read()
         
-        if not txt:
-            continue
+        soup = BeautifulSoup(xml_content, 'xml')
+        segments = soup.find_all('Segment')
         
-        title = segbez.text.strip() if segbez else "Ohne Titel"
-        html_content = txt.text if txt.text else ""
+        # Alle Einträge sammeln (mit Duplikaten)
+        all_entries = []
         
-        # Parse HTML content
-        html_soup = BeautifulSoup(html_content, 'html.parser')
-        
-        # Randzahlen im HTML finden
-        for rz_tag in html_soup.find_all('a', {'name': re.compile(r'RZ_\d+')}):
-            rz_id = rz_tag.get('name', '').replace('RZ_', '')
+        for segment in segments:
+            segbez = segment.find('segbez')
+            txt = segment.find('txt')
             
-            if not rz_id:
+            if not txt:
                 continue
             
-            # Text nach dieser Randzahl bis zur nächsten sammeln
-            text_parts = []
-            for sibling in rz_tag.find_next_siblings():
-                if sibling.name == 'a' and sibling.get('name', '').startswith('RZ_'):
-                    break
-                if hasattr(sibling, 'get_text'):
-                    text_parts.append(sibling.get_text(separator=' ', strip=True))
+            title = segbez.text.strip() if segbez else "Ohne Titel"
+            html_content = txt.text if txt.text else ""
             
-            chunk_text = ' '.join(text_parts).strip()
+            # Parse HTML content
+            html_soup = BeautifulSoup(html_content, 'html.parser')
             
-            if not chunk_text or len(chunk_text) < 10:
-                continue
-            
-            # Extrahiere neuestes Jahr für Versionserkennung
-            latest_year = _extract_latest_year(chunk_text)
-            
-            all_entries.append({
-                'randzahl': rz_id,
-                'titel': title,
-                'text': chunk_text,
-                'segment': title,
-                'text_length': len(chunk_text),
-                'latest_year': latest_year
-            })
-    
-    print(f"   📊 Gefunden: {len(all_entries)} Einträge (vor Deduplizierung)")
-    
-    # DEDUPLIZIERUNG
-    chunks = _deduplicate_ustr_entries(all_entries)
-    
-    print(f"   ✅ Parsed {len(chunks)} UStR chunks (nach Deduplizierung)")
-    
-    return chunks
+            # Randzahlen im HTML finden
+            for rz_tag in html_soup.find_all('a', {'name': re.compile(r'RZ_\d+')}):
+                rz_id = rz_tag.get('name', '').replace('RZ_', '')
+                
+                if not rz_id:
+                    continue
+                
+                # Text nach dieser Randzahl bis zur nächsten sammeln
+                text_parts = []
+                for sibling in rz_tag.find_next_siblings():
+                    if sibling.name == 'a' and sibling.get('name', '').startswith('RZ_'):
+                        break
+                    if hasattr(sibling, 'get_text'):
+                        text_parts.append(sibling.get_text(separator=' ', strip=True))
+                
+                chunk_text = ' '.join(text_parts).strip()
+                
+                if not chunk_text or len(chunk_text) < 10:
+                    continue
+                
+                # Extrahiere neuestes Jahr für Versionserkennung
+                latest_year = _extract_latest_year(chunk_text)
+                
+                all_entries.append({
+                    'randzahl': rz_id,
+                    'titel': title,
+                    'text': chunk_text,
+                    'segment': title,
+                    'text_length': len(chunk_text),
+                    'latest_year': latest_year
+                })
+        
+        print(f"   📊 Gefunden: {len(all_entries)} Einträge (vor Deduplizierung)")
+        
+        # DEDUPLIZIERUNG
+        chunks = _deduplicate_ustr_entries(all_entries)
+        
+        print(f"   ✅ Parsed {len(chunks)} UStR chunks (nach Deduplizierung)")
+        
+        return chunks
+        
+    finally:
+        # Cleanup: Delete temporary file
+        try:
+            os.unlink(xml_path)
+            print(f"   🗑️ Temp file deleted: {xml_path}")
+        except:
+            pass
 
 
 def _extract_latest_year(text: str) -> int:
@@ -1243,15 +1303,16 @@ class Evaluator:
 # =============================================================================
 
 class UStGRAGSystem:
-    """Complete RAG system with all fixes applied"""
+    """Complete RAG system with all fixes applied + Dropbox download"""
     
     def __init__(self):
         print(f"\n{'='*70}")
-        print(f"🚀 UStG RAG System v13 - MIT PARSER FIXES")
+        print(f"🚀 UStG RAG System v13 - MIT PARSER FIXES + DROPBOX")
         print(f"{'='*70}")
         print(f"   ✅ UStG: Absatz 1 Fix aktiv")
         print(f"   ✅ Anhang: Absatz 1 Fix aktiv")
         print(f"   ✅ UStR: Deduplizierung aktiv")
+        print(f"   ✅ UStR: Dropbox Download aktiv")
         
         if torch.cuda.is_available():
             gpu_name = torch.cuda.get_device_name(0)
@@ -1268,8 +1329,8 @@ class UStGRAGSystem:
         print(f"\n📖 Parsing Anhang (mit Absatz 1 Fix)...")
         self.anhang_chunks = parse_anhang_hierarchical(ANHANG_RTF_PATH)
         
-        print(f"\n📖 Parsing UStR (mit Deduplizierung)...")
-        self.ustr_chunks = parse_ustr(USTR_XML_PATH)
+        print(f"\n📖 Parsing UStR (mit Deduplizierung + Dropbox Download)...")
+        self.ustr_chunks = parse_ustr(USTR_XML_URL)
         
         total = len(self.ustg_chunks) + len(self.anhang_chunks) + len(self.ustr_chunks)
         
@@ -1330,8 +1391,8 @@ def run_evaluation(system, use_llm_judge: bool = False):
     results_data = {
         'timestamp': timestamp,
         'evaluation_type': eval_type,
-        'parser_version': 'v13_fixed',
-        'fixes_applied': ['ustg_absatz1', 'anhang_absatz1', 'ustr_dedup'],
+        'parser_version': 'v13_dropbox',
+        'fixes_applied': ['ustg_absatz1', 'anhang_absatz1', 'ustr_dedup', 'ustr_dropbox'],
         'chunk_counts': {
             'ustg': len(system.ustg_chunks),
             'anhang': len(system.anhang_chunks),
@@ -1356,7 +1417,7 @@ def run_evaluation(system, use_llm_judge: bool = False):
 def show_parser_stats(system):
     """Show detailed parser statistics"""
     print(f"\n{'='*70}")
-    print(f"PARSER STATISTICS (FIXED VERSION)")
+    print(f"PARSER STATISTICS (FIXED VERSION + DROPBOX)")
     print(f"{'='*70}\n")
     
     # UStG Stats
@@ -1390,7 +1451,7 @@ def show_parser_stats(system):
     print(f"   Total Chunks: {len(system.anhang_chunks)}")
     
     # UStR Stats
-    print(f"\n📊 UStR:")
+    print(f"\n📊 UStR (Dropbox):")
     rz_set = set()
     for chunk in system.ustr_chunks:
         rz_set.add(chunk.metadata.get('randzahl'))
